@@ -23,3 +23,16 @@ data/logs/
 data/backup/
 evaluation/results/
 **/__pycache__/
+
+.env
+.claude/
+data/
+evaluation/
+docs/
+tools/
+check_edge.py
+HANDOFF_CODEX.md
+node_modules/
+frontend/dist/
+.pytest_cache/
+**/__pycache__/
