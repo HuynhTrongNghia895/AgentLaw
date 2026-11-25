@@ -1,17 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { ArrowUp, ChevronDown, Copy, Menu, PanelLeft, Plus, Shield, Square, Trash2, X } from 'lucide-react'
-import { chatService, createEmptySession } from './services/chatService'
+import { AlertTriangle, ArrowUp, ChevronDown, Copy, ExternalLink, Globe, Menu, PanelLeft, Plus, Shield, Square, Trash2, X } from 'lucide-react'
+import { chatService, createEmptySession, requestFingerprint } from './services/chatService'
 import { deleteSession, listSessions, saveSession } from './db/conversations'
 import { mockCitations, sampleQuestions } from './mocks/fixtures'
-import type { ChatMessage, ChatSession, Citation, Evidence, SystemMetadata } from './types/chat'
+import type { ChatMessage, ChatSession, Citation, Evidence, SystemMetadata, TraceStep } from './types/chat'
 import './App.css'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Strip trailing "Căn cứ pháp lý: [...]" dump if evidences will be shown. */
 function stripCitationDump(content: string, hasEvidences: boolean): string {
   if (!hasEvidences) return content
   return content
@@ -19,19 +18,10 @@ function stripCitationDump(content: string, hasEvidences: boolean): string {
     .trimEnd()
 }
 
-/**
- * Hạng mục 3 — Add bold+spacing to "Ý X." headings in Markdown.
- * We pre-process the raw Markdown string so ReactMarkdown renders it correctly.
- */
 function preprocessMarkdown(content: string): string {
-  // Match lines starting with "Ý <digit(s)>." and bold the heading token
   return content.replace(/^(Ý\s+\d+\.)/gm, '**$1**')
 }
 
-/**
- * Hạng mục 1 (drawer) — Extract "(Hiệu lực văn bản từ YYYY-MM-DD)" from excerpt tail.
- * Returns { cleanExcerpt, effectiveDateBadge }.
- */
 function extractEffectiveDateFromExcerpt(excerpt: string): { cleanExcerpt: string; effectiveDateBadge: string | null } {
   const match = excerpt.match(/\(Hiệu lực văn bản từ\s+[\d\-/]+\)\s*$/i)
   if (!match) return { cleanExcerpt: excerpt, effectiveDateBadge: null }
@@ -41,11 +31,8 @@ function extractEffectiveDateFromExcerpt(excerpt: string): { cleanExcerpt: strin
   }
 }
 
-/** Hạng mục 2 pills — Clean up raw AMENDS/GUIDES prefix and deduplicate. */
 function cleanContextCitation(raw: string): string {
-  // Remove leading "- AMENDS: ", "- GUIDES: " etc.
   let clean = raw.replace(/^-\s*(AMENDS|GUIDES|MODIFIES|SUPPLEMENTS)\s*:\s*/i, '').trim()
-  // Remove doubled halves: "Nghị định 123 Nghị định 123" → "Nghị định 123"
   const half = Math.ceil(clean.length / 2)
   if (clean.slice(0, half).trim() === clean.slice(half).trim()) {
     clean = clean.slice(0, half).trim()
@@ -53,20 +40,23 @@ function cleanContextCitation(raw: string): string {
   return clean
 }
 
-/** Hạng mục 4 — A message counts as "real answer" if it has non-trivial content. */
 function hasRealAnswer(message: ChatMessage): boolean {
   if (message.clarification?.status === 'pending') return false
   const stripped = message.content.trim()
-  // Short system messages (abort notice, skip notice, etc.) have no copy/export value
-  if (stripped.length < 60 && !message.evidences?.length) return false
+  if (stripped.length < 60 && !message.evidences?.length && !message.webContext?.length) return false
   return true
 }
 
+function isInstructionalOption(label: string, requiresInput?: boolean): boolean {
+  if (requiresInput) return true
+  return /^(nêu rõ|chọn số hiệu|nhập\s+|bổ sung\s+)/i.test(label.trim())
+}
+
 // ---------------------------------------------------------------------------
-// Popover — Hạng mục 7
+// Popover
 // ---------------------------------------------------------------------------
 
-const INTERNAL_DOCS = [
+const DEFAULT_INTERNAL_DOCS = [
   'Luật Doanh nghiệp 59/2020/QH14',
   'Nghị định 168/2025/NĐ-CP',
   'Nghị định 296/2026/NĐ-CP',
@@ -75,9 +65,18 @@ const INTERNAL_DOCS = [
   'Luật 116/2025/QH15',
 ]
 
-function MetadataPopover({ label, isMock }: { label: string; isMock: boolean }) {
+function MetadataPopover({
+  label,
+  isMock,
+  documents,
+}: {
+  label: string
+  isMock: boolean
+  documents?: string[]
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const docList = documents && documents.length > 0 ? documents : DEFAULT_INTERNAL_DOCS
 
   useEffect(() => {
     if (!open) return
@@ -102,9 +101,9 @@ function MetadataPopover({ label, isMock }: { label: string; isMock: boolean }) 
       </button>
       {open && (
         <div className="metadata-popover" role="tooltip">
-          <div className="metadata-popover-title">Phạm vi văn bản pháp lý</div>
+          <div className="metadata-popover-title">Phạm vi văn bản pháp lý ({docList.length})</div>
           <ul className="metadata-popover-list">
-            {INTERNAL_DOCS.map((doc) => (
+            {docList.map((doc) => (
               <li key={doc}>{doc}</li>
             ))}
           </ul>
@@ -115,7 +114,31 @@ function MetadataPopover({ label, isMock }: { label: string; isMock: boolean }) 
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar — Hạng mục 5 & 6
+// Per-message Trace Bar (isolated state per message)
+// ---------------------------------------------------------------------------
+
+function MessageTraceBar({ trace }: { trace: TraceStep[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="trace-bar">
+      <button className="trace-toggle" type="button" onClick={() => setOpen((o) => !o)}>
+        <ChevronDown size={14} className={open ? 'rotated' : ''} />
+        <strong>Trace xử lý Agent</strong>
+        <span>{trace.filter((s) => s.status === 'done').length}/{trace.length} bước hoàn thành</span>
+      </button>
+      {open && (
+        <div className="trace-details">
+          {trace.map((step) => (
+            <p key={step.id}>● {step.label}{step.detail ? ` · ${step.detail}` : ''}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar
 // ---------------------------------------------------------------------------
 
 function Sidebar({
@@ -154,7 +177,6 @@ function Sidebar({
       <div className="history-label">LỊCH SỬ GẦN ĐÂY</div>
       <div className="history-list">
         {sessions.map((session) => (
-          /* Hạng mục 5: tooltip via title attribute */
           <div
             className={`history-item ${session.id === activeId ? 'active' : ''}`}
             key={session.id}
@@ -164,7 +186,6 @@ function Sidebar({
               <span>▢</span>
               <span>{session.title}</span>
             </button>
-            {/* Hạng mục 5: delete button already existed, keeping it */}
             <button
               type="button"
               className="delete-session"
@@ -176,7 +197,6 @@ function Sidebar({
           </div>
         ))}
       </div>
-      {/* Hạng mục 6: replace dead "Người dùng / Tài khoản" block */}
       <div className="sidebar-storage-info">
         Lưu trữ cục bộ trên trình duyệt · AgentLaw
       </div>
@@ -240,7 +260,6 @@ function Composer({
       {!compact && <div className="composer-hint">Enter để gửi · Shift + Enter để xuống dòng</div>}
 
       {loading ? (
-        /* Abort button — always enabled when loading */
         <button
           className="send-button abort-button"
           type="button"
@@ -251,7 +270,6 @@ function Composer({
           <Square size={16} />
         </button>
       ) : (
-        /* Send button */
         <button
           className="send-button"
           type="button"
@@ -267,7 +285,7 @@ function Composer({
 }
 
 // ---------------------------------------------------------------------------
-// Clarification Wizard (isolated component → own state → no cross-message leak)
+// Clarification Wizard
 // ---------------------------------------------------------------------------
 
 function ClarificationWizard({
@@ -277,47 +295,76 @@ function ClarificationWizard({
   disabled,
 }: {
   message: ChatMessage
-  onConfirm: (msg: ChatMessage, userAnswerStr: string) => void
+  onConfirm: (msg: ChatMessage, userAnswerPayload: string, displaySummary: string) => void
   onSkip: (msg: ChatMessage) => void
   disabled: boolean
 }) {
   const clarification = message.clarification!
   const [index, setIndex] = useState(0)
+  const [selectedOptionIds, setSelectedOptionIds] = useState<Record<string, string>>({})
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [customTexts, setCustomTexts] = useState<Record<string, string>>({})
+  const [placeholders, setPlaceholders] = useState<Record<string, string>>({})
+  const customInputRef = useRef<HTMLTextAreaElement>(null)
 
-  // Reset wizard state whenever the message/clarification object changes (hạng mục 5)
   const clarifyKey = `${message.id}::${clarification.questions.map((q) => q.id).join(',')}`
   const prevKeyRef = useRef(clarifyKey)
   if (prevKeyRef.current !== clarifyKey) {
     prevKeyRef.current = clarifyKey
     setIndex(0)
+    setSelectedOptionIds({})
     setAnswers({})
     setCustomTexts({})
+    setPlaceholders({})
   }
 
   const totalQ = clarification.questions.length
   const question = clarification.questions[index]
   if (!question) return null
 
-  const handleOptionClick = (optionLabel: string, isOther: boolean) => {
-    setAnswers((prev) => ({ ...prev, [question.id]: isOther ? '' : optionLabel }))
-    if (!isOther) setCustomTexts((prev) => ({ ...prev, [question.id]: '' }))
+  const handleOptionClick = (option: {
+    id: string
+    label: string
+    allowCustomText?: boolean
+    requiresInput?: boolean
+    placeholder?: string
+  }) => {
+    const needsDetailInput = Boolean(option.allowCustomText) || isInstructionalOption(option.label, option.requiresInput)
+    setSelectedOptionIds((prev) => ({ ...prev, [question.id]: option.id }))
+    if (needsDetailInput) {
+      setAnswers((prev) => ({ ...prev, [question.id]: '' }))
+      setPlaceholders((prev) => ({
+        ...prev,
+        [question.id]: option.placeholder || `Nhập chi tiết cho "${option.label}" (ví dụ: Thuế GTGT, doanh nghiệp; hoặc Luật 59/2020/QH14)...`,
+      }))
+      window.setTimeout(() => customInputRef.current?.focus(), 0)
+    } else {
+      setAnswers((prev) => ({ ...prev, [question.id]: option.label }))
+      setCustomTexts((prev) => ({ ...prev, [question.id]: '' }))
+    }
   }
 
   const resolvedAnswer = (qId: string): string => {
     if (answers[qId] === '') return (customTexts[qId] ?? '').trim()
-    return answers[qId] ?? ''
+    return (answers[qId] ?? '').trim()
   }
 
   const allAnswered = clarification.questions.every((q) => resolvedAnswer(q.id) !== '')
-  const canProceed =
-    Boolean(answers[question.id]) || Boolean((customTexts[question.id] ?? '').trim())
+  const canProceed = resolvedAnswer(question.id) !== ''
+  const showDetailBox =
+    answers[question.id] === '' || Boolean(customTexts[question.id])
 
   const handleConfirm = () => {
     if (!allAnswered || disabled) return
-    const summaryItems = clarification.questions.map((q) => `${q.label}: ${resolvedAnswer(q.id)}`)
-    onConfirm(message, summaryItems.join('; '))
+    const items = clarification.questions.map((q) => resolvedAnswer(q.id))
+    const payload =
+      clarification.questions.length === 1
+        ? items[0]
+        : items.map((ans, idx) => `${idx + 1}) ${ans}`).join('\n')
+    const displaySummary = clarification.questions
+      .map((q, idx) => `${q.label || `Ý ${idx + 1}`}: ${items[idx]}`)
+      .join('; ')
+    onConfirm(message, payload, displaySummary)
   }
 
   return (
@@ -340,19 +387,20 @@ function ClarificationWizard({
 
       <div className="wizard-question">
         <h3>{question.question}</h3>
-        <p>Hoàn tất đủ {totalQ} câu để kích hoạt nút xác nhận.</p>
+        <p>
+          {showDetailBox
+            ? 'Vui lòng nhập nội dung cụ thể vào ô bên dưới để kích hoạt nút xác nhận.'
+            : `Hoàn tất đủ ${totalQ} câu để kích hoạt nút xác nhận.`}
+        </p>
         <div className="wizard-options">
           {question.options.map((option) => {
-            const isOther = Boolean(option.allowCustomText)
-            const isSelected = isOther
-              ? answers[question.id] === '' || answers[question.id] === 'Khác'
-              : answers[question.id] === option.label
+            const isSelected = selectedOptionIds[question.id] === option.id
             return (
               <button
                 type="button"
                 key={option.id}
                 className={`wizard-option ${isSelected ? 'selected' : ''}`}
-                onClick={() => handleOptionClick(option.label, isOther)}
+                onClick={() => handleOptionClick(option)}
               >
                 <span className="radio-mark" />
                 <span>
@@ -362,9 +410,9 @@ function ClarificationWizard({
               </button>
             )
           })}
-          {/* Hạng mục (Màn 3): auto-select "Khác" radio when textarea focused/typed */}
-          {(answers[question.id] === '' || Boolean(customTexts[question.id])) && (
+          {showDetailBox && (
             <textarea
+              ref={customInputRef}
               className="custom-answer"
               value={customTexts[question.id] ?? ''}
               onFocus={() => setAnswers((prev) => ({ ...prev, [question.id]: '' }))}
@@ -373,7 +421,7 @@ function ClarificationWizard({
                 setCustomTexts((prev) => ({ ...prev, [question.id]: val }))
                 setAnswers((prev) => ({ ...prev, [question.id]: '' }))
               }}
-              placeholder="Nhập trường hợp cụ thể..."
+              placeholder={placeholders[question.id] || 'Nhập trường hợp cụ thể...'}
             />
           )}
         </div>
@@ -389,15 +437,7 @@ function ClarificationWizard({
               type="button"
               className="wizard-next"
               disabled={!canProceed}
-              onClick={() => {
-                if (answers[question.id] === '' && (customTexts[question.id] ?? '').trim()) {
-                  setAnswers((prev) => ({
-                    ...prev,
-                    [question.id]: (customTexts[question.id] ?? '').trim(),
-                  }))
-                }
-                setIndex((i) => i + 1)
-              }}
+              onClick={() => setIndex((i) => i + 1)}
             >
               Tiếp tục
             </button>
@@ -423,7 +463,7 @@ function ClarificationWizard({
 }
 
 // ---------------------------------------------------------------------------
-// Citation Drawer Body — Hạng mục 1
+// Citation Drawer Body
 // ---------------------------------------------------------------------------
 
 function CitationDrawerContent({
@@ -439,11 +479,11 @@ function CitationDrawerContent({
 }) {
   const { cleanExcerpt, effectiveDateBadge } = extractEffectiveDateFromExcerpt(citation.excerpt ?? '')
 
-  // Hạng mục 1c: check if title duplicates documentName
   const titleIsDuplicate =
     citation.documentName &&
     citation.title &&
-    (citation.documentName.includes(citation.title) || citation.title.includes(citation.documentName) ||
+    (citation.documentName.includes(citation.title) ||
+      citation.title.includes(citation.documentName) ||
       citation.documentName.trim() === citation.title.trim())
 
   const hasRelations = citation.relations && citation.relations.length > 0
@@ -451,7 +491,6 @@ function CitationDrawerContent({
 
   return (
     <div className="drawer-content">
-      {/* Badges row */}
       <div className="drawer-pills">
         <span>{citation.sourceLabel}</span>
         {isContextType ? (
@@ -461,18 +500,14 @@ function CitationDrawerContent({
             ● Còn hiệu lực
           </span>
         )}
-        {/* Hạng mục 1d: effective date badge from excerpt tail */}
         {effectiveDateBadge && (
           <span className="status-effective-date">{effectiveDateBadge}</span>
         )}
       </div>
 
-      {/* Title — always show documentName */}
       <h3>{citation.documentName}</h3>
-      {/* Hạng mục 1c: only show source-status row if it's not a duplicate */}
       {!titleIsDuplicate && <div className="source-status">{citation.title}</div>}
 
-      {/* Hạng mục 1b: hide excerpt block when empty */}
       {hasExcerpt && (
         <div className="drawer-excerpt">
           <strong>Nguyên văn trọng tâm</strong>
@@ -501,7 +536,6 @@ function CitationDrawerContent({
         {copiedCitation ? <span className="copy-feedback">✓ Đã sao chép</span> : <><Copy size={14} /> Chép trích dẫn</>}
       </button>
 
-      {/* Hạng mục 1a: hide relations section when empty */}
       {hasRelations && (
         <div className="legal-relations">
           <h4>Quan hệ pháp lý liên quan</h4>
@@ -531,14 +565,12 @@ function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [input, setInput] = useState('')
-  // Per-session loading map (hạng mục 1)
   const [loadingControllers, setLoadingControllers] = useState<Record<string, AbortController>>({})
-  const [traceOpen, setTraceOpen] = useState(false)
+  const inFlightFingerprints = useRef<Set<string>>(new Set())
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [metadata, setMetadata] = useState<SystemMetadata | null>(null)
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null)
-  // Track whether the selected citation belongs to a context-type evidence
   const [selectedCitationIsContext, setSelectedCitationIsContext] = useState(false)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [copiedCitation, setCopiedCitation] = useState(false)
@@ -551,9 +583,7 @@ function App() {
     void chatService.getSystemMetadata().then(setMetadata)
   }, [])
 
-  // Derived: is the currently viewed session loading?
   const activeLoading = activeId !== null && activeId in loadingControllers
-
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
 
   const persist = async (session: ChatSession) => {
@@ -561,18 +591,17 @@ function App() {
     setSessions((current) => [session, ...current.filter((s) => s.id !== session.id)])
   }
 
-  // hạng mục 3 & 4: reset drawer + highlight on session switch
   const selectSession = (id: string) => {
     setActiveId(id)
-    setSelectedCitation(null)   // hạng mục 3
+    setSelectedCitation(null)
     setSidebarOpen(false)
   }
 
   const createSession = () => {
     const session = createEmptySession()
     void persist(session)
-    setActiveId(session.id)     // hạng mục 4: set immediately so sidebar highlights correctly
-    setSelectedCitation(null)   // hạng mục 3
+    setActiveId(session.id)
+    setSelectedCitation(null)
     setInput('')
     setSidebarOpen(false)
   }
@@ -581,7 +610,6 @@ function App() {
     await deleteSession(id)
     setSessions((current) => {
       const remaining = current.filter((s) => s.id !== id)
-      // If we deleted the active session, switch to next or clear
       if (activeId === id) {
         const next = remaining[0]
         setActiveId(next ? next.id : null)
@@ -591,9 +619,6 @@ function App() {
     })
   }
 
-  // -------------------------------------------------------------------------
-  // Abort helper (hạng mục 2)
-  // -------------------------------------------------------------------------
   const abortSession = (sessionId: string) => {
     const controller = loadingControllers[sessionId]
     if (controller) controller.abort()
@@ -608,9 +633,6 @@ function App() {
     if (activeId) abortSession(activeId)
   }
 
-  // -------------------------------------------------------------------------
-  // Send question (hạng mục 1)
-  // -------------------------------------------------------------------------
   const sendQuestion = async (question = input, overrideSessionId?: string) => {
     const text = question.trim()
     if (!text) return
@@ -625,9 +647,9 @@ function App() {
     }
 
     const targetSessionId = session.id
-
-    // Guard: don't start a second request for the same session
-    if (targetSessionId in loadingControllers) return
+    const fingerprint = `${targetSessionId}|${requestFingerprint(text, '', 'question')}`
+    if (targetSessionId in loadingControllers || inFlightFingerprints.current.has(fingerprint)) return
+    inFlightFingerprints.current.add(fingerprint)
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -650,25 +672,24 @@ function App() {
     setActiveId(targetSessionId)
     setInput('')
 
-    // Create AbortController for this session
     const controller = new AbortController()
     setLoadingControllers((prev) => ({ ...prev, [targetSessionId]: controller }))
 
     try {
       const answer = await chatService.sendMessage(nextSession, text, undefined, controller.signal)
-      // Write result into targetSessionId regardless of which session is currently active (hạng mục 1)
       const latestSession = await import('./db/conversations').then((m) =>
         m.getSession(targetSessionId),
       )
       const baseMessages = latestSession?.messages ?? nextSession.messages
       const completed: ChatSession = {
         ...(latestSession ?? nextSession),
+        conversationContext: nextSession.conversationContext,
+        plannerState: nextSession.plannerState,
         messages: [...baseMessages, answer],
         updatedAt: Date.now(),
       }
       await persist(completed)
     } catch (err: unknown) {
-      // Aborted — show a neutral notice, not an error (hạng mục 2)
       if (err instanceof DOMException && err.name === 'AbortError') {
         const abortedMsg: ChatMessage = {
           id: crypto.randomUUID(),
@@ -680,12 +701,11 @@ function App() {
           m.getSession(targetSessionId),
         )
         const baseMessages = latestSession?.messages ?? nextSession.messages
-        const abortedSession: ChatSession = {
+        await persist({
           ...(latestSession ?? nextSession),
           messages: [...baseMessages, abortedMsg],
           updatedAt: Date.now(),
-        }
-        await persist(abortedSession)
+        })
         return
       }
       const errMsg = err instanceof Error ? err.message : String(err)
@@ -699,13 +719,13 @@ function App() {
         m.getSession(targetSessionId),
       )
       const baseMessages = latestSession?.messages ?? nextSession.messages
-      const errorSession: ChatSession = {
+      await persist({
         ...(latestSession ?? nextSession),
         messages: [...baseMessages, errorMsg],
         updatedAt: Date.now(),
-      }
-      await persist(errorSession)
+      })
     } finally {
+      inFlightFingerprints.current.delete(fingerprint)
       setLoadingControllers((prev) => {
         const next = { ...prev }
         delete next[targetSessionId]
@@ -714,19 +734,32 @@ function App() {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Clarification confirm (hạng mục 1 — same session-isolation pattern)
-  // -------------------------------------------------------------------------
-  const confirmClarification = async (message: ChatMessage, userAnswerStr: string) => {
+  const confirmClarification = async (
+    message: ChatMessage,
+    userAnswerPayload: string,
+    displaySummary: string,
+  ) => {
     if (!activeSession) return
     const targetSessionId = activeSession.id
-    if (targetSessionId in loadingControllers) return
+    const lastUserMsg = [...activeSession.messages].reverse().find((m) => m.role === 'user')
+    const originalQuestion = lastUserMsg?.content ?? ''
+    const fingerprint = `${targetSessionId}|${requestFingerprint(
+      originalQuestion,
+      userAnswerPayload,
+      'clarification',
+    )}`
+    if (targetSessionId in loadingControllers || inFlightFingerprints.current.has(fingerprint)) return
+    inFlightFingerprints.current.add(fingerprint)
 
-    const summaryItems = userAnswerStr.split('; ')
+    const summaryItems = displaySummary.split('; ')
     const completedMsg: ChatMessage = {
       ...message,
       content: `### Đã xác nhận làm rõ\n${summaryItems.map((s) => `- **${s}**`).join('\n')}\n\n*Đang gửi phản hồi làm rõ đến AgentLaw...*`,
-      clarification: { ...message.clarification!, status: 'completed' as const, completedSummary: userAnswerStr },
+      clarification: {
+        ...message.clarification!,
+        status: 'completed' as const,
+        completedSummary: displaySummary,
+      },
     }
     const nextSession: ChatSession = {
       ...activeSession,
@@ -739,12 +772,10 @@ function App() {
     setLoadingControllers((prev) => ({ ...prev, [targetSessionId]: controller }))
 
     try {
-      const lastUserMsg = [...nextSession.messages].reverse().find((m) => m.role === 'user')
-      const originalQuestion = lastUserMsg?.content ?? ''
       const answer = await chatService.sendMessage(
         nextSession,
         originalQuestion,
-        userAnswerStr,
+        userAnswerPayload,
         controller.signal,
       )
       const latestSession = await import('./db/conversations').then((m) =>
@@ -753,6 +784,8 @@ function App() {
       const baseMessages = latestSession?.messages ?? nextSession.messages
       await persist({
         ...(latestSession ?? nextSession),
+        conversationContext: nextSession.conversationContext,
+        plannerState: nextSession.plannerState,
         messages: [...baseMessages, answer],
         updatedAt: Date.now(),
       })
@@ -792,6 +825,7 @@ function App() {
         updatedAt: Date.now(),
       })
     } finally {
+      inFlightFingerprints.current.delete(fingerprint)
       setLoadingControllers((prev) => {
         const next = { ...prev }
         delete next[targetSessionId]
@@ -800,9 +834,6 @@ function App() {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Skip clarification (hạng mục 6)
-  // -------------------------------------------------------------------------
   const skipClarification = (message: ChatMessage) => {
     if (!activeSession) return
     const intentLabel =
@@ -816,15 +847,13 @@ function App() {
     }
     const nextSession: ChatSession = {
       ...activeSession,
+      plannerState: null,
       messages: activeSession.messages.map((m) => (m.id === message.id ? skippedMsg : m)),
       updatedAt: Date.now(),
     }
     void persist(nextSession)
   }
 
-  // -------------------------------------------------------------------------
-  // Utilities
-  // -------------------------------------------------------------------------
   const copyAnswer = async (id: string, content: string) => {
     await navigator.clipboard.writeText(content)
     setCopiedId(id)
@@ -841,7 +870,6 @@ function App() {
     await chatService.exportToDocx(message.id, message.content)
   }
 
-  // Hạng mục 2 pills — open evidence and track if it's a context type
   const openEvidence = (evidence: Evidence) => {
     const isCtx = evidence.type === 'context'
     const citation = mockCitations.find((item) => item.id === evidence.id) ?? {
@@ -859,12 +887,8 @@ function App() {
     setSelectedCitationIsContext(isCtx)
   }
 
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${selectedCitation ? 'drawer-open' : ''}`}>
-      {/* hạng mục 4: activeId passed directly so highlight is always in-sync */}
       <Sidebar
         sessions={sessions}
         activeId={activeId}
@@ -886,10 +910,10 @@ function App() {
           )}
           <div className="header-title">AgentLaw</div>
           <div className="header-status">
-            {/* Hạng mục 7: clickable popover for internal docs */}
             <MetadataPopover
               label={metadata?.internalDataLabel ?? 'Dữ liệu nội bộ'}
               isMock={metadata?.isMock ?? false}
+              documents={metadata?.internalDocuments}
             />
             <div className="ready-status"><span className="ready-dot" />Sẵn sàng</div>
           </div>
@@ -925,34 +949,25 @@ function App() {
           <>
             <section className="workspace chat-workspace">
               <div className="chat-content">
-                {activeSession.messages.map((message) =>
-                  message.role === 'user' ? (
-                    <div className="user-row" key={message.id}>
-                      <div className="user-bubble">{message.content}</div>
-                    </div>
-                  ) : (
+                {activeSession.messages.map((message) => {
+                  if (message.role === 'user') {
+                    return (
+                      <div className="user-row" key={message.id}>
+                        <div className="user-bubble">{message.content}</div>
+                      </div>
+                    )
+                  }
+                  const primaryEvidences = (message.evidences ?? []).filter((e) => e.type === 'primary')
+                  const contextEvidences = (message.evidences ?? []).filter((e) => e.type === 'context')
+
+                  return (
                     <div className="answer-wrap" key={message.id}>
                       <div className="agent-avatar"><Shield size={16} /></div>
                       <div className="answer-column">
-                        {/* Trace bar */}
                         {message.trace && message.trace.length > 0 && (
-                          <div className="trace-bar">
-                            <button className="trace-toggle" type="button" onClick={() => setTraceOpen((o) => !o)}>
-                              <ChevronDown size={14} className={traceOpen ? 'rotated' : ''} />
-                              <strong>Trace xử lý Agent</strong>
-                              <span>{message.trace.filter((s) => s.status === 'done').length}/{message.trace.length} bước hoàn thành</span>
-                            </button>
-                            {traceOpen && (
-                              <div className="trace-details">
-                                {message.trace.map((step) => (
-                                  <p key={step.id}>● {step.label}{step.detail ? ` · ${step.detail}` : ''}</p>
-                                ))}
-                              </div>
-                            )}
-                          </div>
+                          <MessageTraceBar trace={message.trace} />
                         )}
 
-                        {/* Verification banner */}
                         {message.verificationBanner && (
                           <div className="verification-banner">
                             <strong>⚠ {message.verificationBanner.title}</strong>
@@ -960,54 +975,105 @@ function App() {
                           </div>
                         )}
 
-                        {/* Answer content (hạng mục 7: strip citation dump; hạng mục 3: bold "Ý X.") */}
                         <article className="answer-card answer-card--spaced">
                           <ReactMarkdown>
                             {preprocessMarkdown(
                               stripCitationDump(
                                 message.content,
-                                Boolean(message.evidences && message.evidences.length > 0),
-                              )
+                                primaryEvidences.length > 0 || contextEvidences.length > 0,
+                              ),
                             )}
                           </ReactMarkdown>
                         </article>
 
-                        {/* Clarification Wizard (hạng mục 5: isolated per message) */}
                         {message.clarification && message.clarification.status === 'pending' && (
                           <ClarificationWizard
                             message={message}
-                            onConfirm={(msg, answerStr) => void confirmClarification(msg, answerStr)}
+                            onConfirm={(msg, payload, summary) => void confirmClarification(msg, payload, summary)}
                             onSkip={skipClarification}
                             disabled={activeLoading}
                           />
                         )}
 
-                        {/* Evidence pills — Hạng mục 2: clean context pill text + ring on selected */}
-                        {message.evidences && message.evidences.length > 0 && (
-                          <div className="evidence-section">
-                            <div className="evidence-heading primary-heading">CĂN CỨ TRẢ LỜI CHÍNH (PRIMARY EVIDENCE)</div>
-                            <div className="evidence-pills">
-                              {message.evidences.filter((e) => e.type === 'primary').map((evidence) => {
-                                const isSelected = selectedCitation?.id === evidence.id
-                                return (
-                                  <button
-                                    className={`evidence-pill primary-pill ${isSelected ? 'pill-selected-primary' : ''}`}
-                                    type="button"
-                                    key={evidence.id}
-                                    onClick={() => openEvidence(evidence)}
-                                    title={evidence.citation}
-                                  >
-                                    <strong>{evidence.title}</strong>
-                                    <span>{evidence.citation}</span>
-                                  </button>
-                                )
-                              })}
+                        {/* Dedicated Web Extraction & Source Verification Card */}
+                        {message.webContext && message.webContext.length > 0 && (
+                          <div className="web-context-section">
+                            <div className="web-context-header">
+                              <Globe size={14} />
+                              <span>THÔNG TIN TRÍCH XUẤT TỪ NGUỒN WEB MỞ RỘNG</span>
                             </div>
-                            {message.evidences.some((e) => e.type === 'context') && (
+                            <div className="web-context-warning">
+                              <AlertTriangle size={14} />
+                              <span>
+                                <strong>Lưu ý đối chiếu:</strong> Dữ liệu dưới đây được trích xuất tự động từ trang web bên ngoài. Vui lòng tìm hiểu thêm và đối chiếu trực tiếp văn bản gốc tại nguồn ghi rõ bên dưới trước khi áp dụng.
+                              </span>
+                            </div>
+                            <div className="web-context-list">
+                              {message.webContext.map((item) => (
+                                <div className="web-context-card" key={item.id}>
+                                  <div className="web-context-card-top">
+                                    <span className="web-domain-badge">{item.sourceDomain}</span>
+                                    {item.authorityTier === 'official' && (
+                                      <span className="web-official-badge">Cổng chính thức</span>
+                                    )}
+                                    {item.date && <span className="web-date-badge">{item.date}</span>}
+                                  </div>
+                                  <strong className="web-context-title">{item.title}</strong>
+                                  {item.extractedPoints.length > 0 && (
+                                    <ul className="web-extracted-points">
+                                      {item.extractedPoints.map((pt, idx) => (
+                                        <li key={idx}>{pt}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                  <div className="web-context-footer">
+                                    <span className="web-item-warning">{item.warning}</span>
+                                    {item.url && (
+                                      <a
+                                        className="web-source-link"
+                                        href={item.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                      >
+                                        Tra cứu tại {item.sourceDomain} <ExternalLink size={12} />
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {(primaryEvidences.length > 0 || contextEvidences.length > 0) && (
+                          <div className="evidence-section">
+                            {primaryEvidences.length > 0 && (
+                              <>
+                                <div className="evidence-heading primary-heading">CĂN CỨ TRẢ LỜI CHÍNH (PRIMARY EVIDENCE)</div>
+                                <div className="evidence-pills">
+                                  {primaryEvidences.map((evidence) => {
+                                    const isSelected = selectedCitation?.id === evidence.id
+                                    return (
+                                      <button
+                                        className={`evidence-pill primary-pill ${isSelected ? 'pill-selected-primary' : ''}`}
+                                        type="button"
+                                        key={evidence.id}
+                                        onClick={() => openEvidence(evidence)}
+                                        title={evidence.citation}
+                                      >
+                                        <strong>{evidence.title}</strong>
+                                        <span>{evidence.citation}</span>
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              </>
+                            )}
+                            {contextEvidences.length > 0 && (
                               <>
                                 <div className="evidence-heading context-heading">BỐI CẢNH SỬA ĐỔI / HƯỚNG DẪN (LEGAL CONTEXT)</div>
                                 <div className="evidence-pills">
-                                  {message.evidences.filter((e) => e.type === 'context').map((evidence) => {
+                                  {contextEvidences.map((evidence) => {
                                     const cleanCit = cleanContextCitation(evidence.citation)
                                     const isSelected = selectedCitation?.id === evidence.id
                                     return (
@@ -1029,7 +1095,6 @@ function App() {
                           </div>
                         )}
 
-                        {/* Actions — Hạng mục 4: hide when no real answer */}
                         {hasRealAnswer(message) && (
                           <div className="answer-actions">
                             <button className="action-button" type="button" onClick={() => void copyAnswer(message.id, message.content)}>
@@ -1041,9 +1106,8 @@ function App() {
                       </div>
                     </div>
                   )
-                )}
+                })}
 
-                {/* Loading indicator — only shown for currently active session */}
                 {activeLoading && (
                   <div className="loading-answer">
                     <span className="loading-spinner" />
@@ -1066,7 +1130,6 @@ function App() {
         )}
       </main>
 
-      {/* Citation Side Drawer (Màn 4) — Hạng mục 1 fixes applied via CitationDrawerContent */}
       {selectedCitation && (
         <aside className="citation-drawer" role="dialog" aria-label="Chi tiết căn cứ pháp lý">
           <div className="drawer-header">

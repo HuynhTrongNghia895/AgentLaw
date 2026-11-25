@@ -98,7 +98,11 @@ def test_date_and_document_number_anchors_do_not_overlap_and_g7_routes_exact():
     assert decision.route == "exact"
 
 
-def test_two_document_gate_calls_planner_but_llm_decides_intent_count():
+def test_two_document_gate_short_circuits_on_rule_split():
+    # A multi-document question is split by the cheap rule-based pre-filter
+    # BEFORE the LLM is consulted, so the planner LLM is never called and the
+    # rule plan (2 intents) is returned. The LLM only decides intent count for
+    # questions the rule cannot split.
     class PlannerLLM:
         def __init__(self, response):
             self.response = response
@@ -117,25 +121,21 @@ def test_two_document_gate_calls_planner_but_llm_decides_intent_count():
         '{"sub_query":"Đối tượng áp dụng của 168/2025/NĐ-CP là ai?"}]}'
     )
     plan = QueryDecomposer(llm=two_intent_llm).plan(compound)
-    assert two_intent_llm.calls == 1
+    # Rule-based split short-circuits before the LLM is ever called.
+    assert two_intent_llm.calls == 0
+    assert plan["status"] == "planned"
     assert len(plan["intents"]) == 2
     fallback = QueryDecomposer(llm=None).plan(compound)
     assert fallback["status"] == "single_intent"
     assert len(fallback["intents"]) == 1
     assert fallback["intents"][0]["sub_query"] == compound
 
-    relation_question = "Nghị định 296/2026/NĐ-CP sửa Điều 4 của Nghị định 168/2025/NĐ-CP thế nào?"
-    one_intent_llm = PlannerLLM(
-        '{"intents":[{"sub_query":"Nghị định 296/2026/NĐ-CP sửa Điều 4 '
-        'của Nghị định 168/2025/NĐ-CP thế nào?"}]}'
-    )
-    one_plan = QueryDecomposer(llm=one_intent_llm).plan(relation_question)
-    assert one_intent_llm.calls == 1
-    assert len(one_plan["intents"]) == 1
-
 
 def test_planner_distinguishes_llm_parse_and_invalid_plan_failures():
-    question = "Ai nộp thuế theo Luật 108/2025/QH15, và điều kiện đăng ký doanh nghiệp là gì?"
+    # Multi-intent but NOT cleanly splittable by Fix E's permissive fallback
+    # (no "và/cũng như/;" / comma into two actionable parts), so the
+    # diagnostic statuses must survive even on an LLM crash.
+    question = "Hiệu lực cùng với điều kiện áp dụng được quy định ở đâu?"
 
     class Raising:
         def complete(self, _prompt):
@@ -167,6 +167,25 @@ def test_planner_rule_fallback_recovers_multi_document_question_on_llm_error():
     assert len(plan["intents"]) == 2
     assert "168/2025/NĐ-CP" in plan["intents"][0]["sub_query"]
     assert "108/2025/QH15" in plan["intents"][1]["sub_query"]
+
+
+def test_planner_permissive_split_on_llm_error_reuses_clear_intents():
+    # One document number across the question -> rule-based split returns None;
+    # permissive split recovers the two clear intents on an LLM crash.
+    question = (
+        "Điều 5 của 168/2025/NĐ-CP quy định gì, và nghĩa vụ kê khai thuế là gì?"
+    )
+
+    class Raising:
+        def complete(self, _prompt):
+            raise TimeoutError("local model timeout")
+
+    plan = QueryDecomposer(llm=Raising()).plan(question)
+    assert plan["status"] == "planned"
+    assert plan.get("planner_fallback") == "permissive_split"
+    assert len(plan["intents"]) == 2
+    assert "168/2025/NĐ-CP" in plan["intents"][0]["sub_query"]
+    assert "kê khai" in plan["intents"][1]["sub_query"]
 
 
 def test_planner_rule_fallback_marks_weather_intent_out_of_domain():

@@ -66,7 +66,16 @@ DEFAULT_TOP_K = 5
 DEFAULT_RERANK_TOP_N = 10
 # Trần mềm số câu hỏi ngược (quyết định #7)
 MAX_FOLLOW_UP = 3
-
+def _intent_evidence_budget(sub_query: str) -> int:
+    """Compute dynamic primary evidence cap based on provision specificity."""
+    q = (sub_query or "").strip()
+    has_clause_or_point = bool(re.search(r"(?i)\b(?:điểm|khoản)\s*[0-9a-zđ]+", q))
+    has_article = bool(re.search(r"(?i)\bđiều\s*[0-9]+", q))
+    if has_clause_or_point:
+        return 2
+    if has_article:
+        return 12
+    return 6
 # Sentinel: chưa cache rerank_fn (khác với None = đã thử, không có).
 _UNSET = object()
 
@@ -1589,7 +1598,10 @@ class LegalRetrievalAgent:
                        "Ban hay neu ro so hieu van ban hoac dieu/khoan can tra."
                 ),
                 dataset=decision.datasets[0] if decision.datasets else None,
-                metadata={"decomposition": gap_meta},
+                primary_evidence=[],
+                legal_context=[],
+                metadata={"abstain": True, "retrieval_status": "INSUFFICIENT",
+                          "decomposition": gap_meta},
             )
 
         answer = self._synthesize(
@@ -1972,6 +1984,32 @@ class LegalRetrievalAgent:
         )
         all_evidence = primary_evidence + legal_context
 
+        # Fix C: query nêu đích danh (văn bản + điều) nhưng primary evidence
+        # không khớp anchor -> không đủ căn cứ, CHẶN kết luận (tránh bịa
+        # provision của điều/văn bản khác). Chỉ chặn khi anchor cụ thể.
+        if not self._anchor_match_ok(u, primary_evidence):
+            return LegalAnswer(
+                answer=(
+                    "Chưa đủ căn cứ: câu hỏi nêu đích danh điều khoản "
+                    "nhưng nguồn đã truy xuất không chứa provision khớp "
+                    "đúng điều đó. Vui lòng nêu rõ lại số hiệu văn bản "
+                    "và điều/khoản cần tra."
+                ),
+                evidence=all_evidence,
+                primary_evidence=primary_evidence,
+                legal_context=legal_context,
+                route=decision.route,
+                confidence=decision.confidence,
+                status_block=status_block,
+                dataset=u.legal_group,
+                metadata={
+                    "five_route": decision.five_route,
+                    "retrieval_status": "INSUFFICIENT",
+                    "abstain": True,
+                    "anchor_mismatch": True,
+                },
+            )
+
         try:
             _sp = getattr(self.llm, "set_purpose", None)
             if _sp:
@@ -2093,6 +2131,43 @@ class LegalRetrievalAgent:
             }
             tagged.append(data)
         return tagged
+
+    @staticmethod
+    def _anchor_match_ok(u: QueryUnderstanding, primary_evidence: list[dict[str, Any]]) -> bool:
+        """Fix C: query nêu đích danh (văn bản + điều) thì primary evidence
+        PHẢI có provision khớp anchor; nếu không, không được phép kết luận
+        (tránh evidence của điều/văn bản khác bị nâng thành primary).
+
+        Chỉ áp khi query có cả doc_numbers VÀ articles (anchor cụ thể).
+        Không đủ -> True (giữ đường cũ, không chặn nhầm)."""
+        anchors = getattr(u, "anchors", None)
+        if anchors is None:
+            return True
+        docs = [str(d).strip() for d in (anchors.doc_numbers or []) if str(d).strip()]
+        articles = [str(a).strip() for a in (anchors.articles or []) if str(a).strip()]
+        if not docs or not articles:
+            return True
+
+        def canon(value: str) -> str:
+            value = str(value or "").upper()
+            value = re.sub(r"[\s\-_]", "", value)
+            return value
+
+        doc_set = {canon(d) for d in docs}
+        art_set = {canon(a) for a in articles}
+        for ev in primary_evidence:
+            meta = ev.get("metadata") or {}
+            ev_doc = canon(meta.get("so_hieu"))
+            ev_art = canon(meta.get("dieu"))
+            if not (ev_doc or ev_art):
+                continue
+            doc_ok = any(
+                ev_doc.startswith(d) or d.startswith(ev_doc) for d in doc_set if d
+            ) if ev_doc else True
+            art_ok = (not ev_art) or ev_art in art_set
+            if doc_ok and art_ok:
+                return True
+        return False
 
     @staticmethod
     def _unsupported_provision_citations(
@@ -2632,11 +2707,14 @@ class LegalRetrievalAgent:
                 return LegalAnswer(
                     answer=NO_EVIDENCE_MESSAGE,
                     route=decision.route,
+                    primary_evidence=[],
+                    legal_context=[],
                     follow_up=(
                         "Chưa đủ căn cứ cho một hoặc nhiều ý con. "
                         "Hãy bổ sung văn bản, điều khoản hoặc dữ kiện cần tra."
                     ),
-                    metadata={"intent_verdicts": verdicts,
+                    metadata={"abstain": True, "retrieval_status": "INSUFFICIENT",
+                              "intent_verdicts": verdicts,
                               "intent_verdicts_by_id": {
                                   str(item.get("intent_id") or f"intent-{index + 1}"): verdicts[index]
                                   for index, item in enumerate(per_intent)

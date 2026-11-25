@@ -1,20 +1,3 @@
-"""WebSearch Agent (P7) — bổ sung nguồn pháp luật từ web.
-
-Ràng buộc đã chốt (PROJECT_CONTEXT §4, quyết định #9, #12):
-  - **Domain-restriction bắt buộc**: chỉ `vbpl.vn`, `chinhphu.vn`,
-    `thuvienphapluat.vn`.
-  - **Chỉ gọi khi fast-track không đủ** (quyết định #12) — orchestrator
-    quyết định, agent này chỉ thực thi.
-  - Nội dung web là **DỮ LIỆU KHÔNG TIN CẬY** — không được gọi LLM với
-    nội dung này như mệnh lệnh.
-  - Kiểm tra tình trạng hiệu lực của văn bản tìm được trước khi trả
-    (agent LLM tóm tắt; nếu không rõ -> ghi "nguồn không nêu rõ").
-
-Tavily chưa cài trong môi trường này → module degrade gracefully:
-`search()` trả về danh sách rỗng + `available=False`, orchestrator biết
-và bỏ qua nhánh web (không lỗi, không chết).
-"""
-
 from __future__ import annotations
 
 import os

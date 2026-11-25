@@ -256,6 +256,46 @@ class Orchestrator:
     # -- Quyết định gọi web -------------------------------------------------
 
     @staticmethod
+    def _temporal_verification(state: "OrchestratorState") -> dict[str, Any]:
+        """Fix F: separate 'web was called' from 'claim was confirmed'.
+
+        Returns {web_called, web_status, status} so the UI only shows
+        "đã xác minh" when web actually returned a source. A time-travel
+        answer without a confirmed web source is provisional, not confirmed."""
+        intent = getattr(state.understanding, "intent", "")
+        is_temporal = intent in (INTENT_HIEU_LUC, INTENT_TIME_TRAVEL)
+        if not is_temporal:
+            return {}
+        results = getattr(state, "web_results", []) or []
+        if not results and getattr(state, "web_result", None) is not None:
+            results = [("", state.question, state.web_result)]
+        web_called = bool(results)
+        confirmed = False
+        no_result = False
+        unavailable = False
+        for _intent_id, _query, result in results:
+            if getattr(result, "available", None) is False:
+                unavailable = True
+                continue
+            if result.sources:
+                confirmed = True
+            else:
+                no_result = True
+        if confirmed:
+            web_status = "confirmed"
+            status = "confirmed"
+        elif unavailable and not confirmed:
+            web_status = "unavailable"
+            status = "unverified"
+        elif no_result:
+            web_status = "no_result"
+            status = "provisional"
+        else:
+            web_status = "called"
+            status = "provisional"
+        return {"web_called": web_called, "web_status": web_status, "status": status}
+
+    @staticmethod
     def _web_targets(state: OrchestratorState) -> list[tuple[str, str]]:
         """Return eligible per-intent Web queries, excluding clarification/errors."""
         internal = getattr(state, "internal_answer", None)
@@ -651,7 +691,7 @@ class Orchestrator:
             if legal_status_query:
                 internal_answer = str(_field(internal, "answer", "") or "").strip()
                 limitation = (
-                    "L\u01b0u \u00fd: n\u1ed9i dung tr\u00ean l\u00e0 c\u0103n c\u1ee9 n\u1ed9i b\u1ed9 "
+                    "Ch\u01b0a x\u00e1c minh \u0111\u01b0\u1ee3c hi\u1ec7u l\u1ef1c: n\u1ed9i dung tr\u00ean l\u00e0 c\u0103n c\u1ee9 n\u1ed9i b\u1ed9 "
                     "\u0111\u00e3 truy xu\u1ea5t; ch\u01b0a \u0111\u1ed1i chi\u1ebfu hi\u1ec7u l\u1ef1c "
                     "v\u1edbi ngu\u1ed3n ch\u00ednh th\u1ee9c tr\u00ean Web (T2)."
                 )
@@ -972,6 +1012,7 @@ class Orchestrator:
                 all(result.available is not False for _, _, result in state.web_results)
                 if state.web_results else _field(state.web_result, "available")
             ),
+            "temporal_verification": self._temporal_verification(state),
             "web_sources": [
                 {**source.to_dict(), "intent_id": intent_id, "query": query}
                 for intent_id, query, result in state.web_results

@@ -4,6 +4,17 @@ import type { ChatMessage, ChatSession, SystemMetadata } from '../types/chat'
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
+export type ChatRequestKind = 'question' | 'clarification'
+
+export function requestFingerprint(
+  question: string,
+  userAnswer = '',
+  kind: ChatRequestKind = 'question',
+): string {
+  const normalize = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+  return `${kind}|${normalize(question)}|${normalize(userAnswer)}`
+}
+
 export interface ChatService {
   sendMessage(
     session: ChatSession,
@@ -27,6 +38,7 @@ class ApiChatService implements ChatService {
       return {
         internalDataLabel: data.internalDataLabel || 'Dữ liệu nội bộ',
         internalDataDate: data.internalDataDate,
+        internalDocuments: Array.isArray(data.internalDocuments) ? data.internalDocuments : undefined,
         readiness: data.readiness || 'ready',
         isMock: false,
       }
@@ -70,7 +82,6 @@ class ApiChatService implements ChatService {
         signal,
       })
     } catch (netErr: unknown) {
-      // Re-throw AbortError as-is so callers can distinguish abort from real network error
       if (netErr instanceof DOMException && netErr.name === 'AbortError') throw netErr
       const msg = netErr instanceof Error ? netErr.message : String(netErr)
       throw new Error(
@@ -96,7 +107,6 @@ class ApiChatService implements ChatService {
 
     const data = await response.json()
 
-    // Persist conversationContext and plannerState into session object (mutate-in-place for caller)
     if (data.conversationContext) session.conversationContext = data.conversationContext
     session.plannerState = data.plannerState ?? null
 

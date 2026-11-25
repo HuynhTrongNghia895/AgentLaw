@@ -329,6 +329,198 @@ class QueryDecomposer:
         self.clarify_question = clarify_question
         self.sub_query_rewriter = sub_query_rewriter
 
+    @staticmethod
+    def _single_intent_scope_hint(text: str) -> dict[str, Any] | None:
+        """Record a clarification hint for an intent missing document or essential scope."""
+        question = (text or "").strip()
+        if not question:
+            return None
+        has_provision = bool(re.search(
+            r"(?i)\b(?:điểm|khoản|điều)\s*[0-9]", question
+        ))
+        has_document = bool(extract_anchors(question).doc_numbers)
+        if has_provision and not has_document:
+            return {
+                "needs_clarification": True,
+                "ambiguity_type": "document",
+                "missing_scope": ["document"],
+                "clarification": (
+                    "Bạn muốn tra Điều/Khoản/Điểm này của văn bản nào? "
+                    "Vui lòng cho tên hoặc số hiệu văn bản."
+                ),
+            }
+        vague = bool(re.search(
+            r"(?i)^(?:cho tôi kết luận pháp lý cụ thể|hãy cho tôi kết luận pháp lý|"
+            r"kết luận pháp lý)\b",
+            question,
+        ))
+        if vague:
+            return {
+                "needs_clarification": True,
+                "ambiguity_type": "scope",
+                "missing_scope": ["scope"],
+                "clarification": (
+                    "Vui lòng nêu vấn đề pháp lý cụ thể, văn bản/điều khoản "
+                    "liên quan và dữ kiện vụ việc nếu có."
+                ),
+            }
+
+        # Open tax queries lacking both document anchor and tax/taxpayer scope
+        broad_tax_query = bool(re.search(
+            r"(?i)\b(?:nghĩa vụ\s+kê\s+khai\s+thuế|kê\s+khai\s+thuế|nộp\s+thuế|hoàn\s+thuế|"
+            r"miễn\s+thuế|giảm\s+thuế|thuế\s+suất|đóng\s+góp\s+từ\s+thiện)\b",
+            question,
+        ))
+        if broad_tax_query and not has_document:
+            missing: list[str] = []
+            if not re.search(
+                r"(?i)(?:thuế\s+(?:TNCN|TNDN|GTGT|môn\s+bài|tiêu\s+thụ\s+đặc\s+biệt|"
+                r"xuất\s+nhập\s+khẩu|thu\s+nhập\s+cá\s+nhân|thu\s+nhập\s+doanh\s+nghiệp|"
+                r"giá\s+trị\s+gia\s+tăng)|GTGT|TNDN|TNCN)",
+                question,
+            ):
+                missing.append("tax_type")
+            if not re.search(
+                r"(?i)(?:cá\s+nhân|doanh\s+nghiệp|công\s+ty|hộ\s+kinh\s+doanh|tổ\s+chức|người\s+nộp\s+thuế)",
+                question,
+            ):
+                missing.append("taxpayer")
+            if re.search(r"(?i)(?:đóng\s+góp\s+từ\s+thiện|khoản\s+từ\s+thiện)", question) and not re.search(
+                r"(?i)(?:ủng\s+hộ|quyên\s+góp|từ\s+thiện\s+(?:cho|tại|đến)\s+\w+)", question
+            ):
+                missing.append("donation_type")
+            if missing:
+                labels = {
+                    "tax_type": "sắc thuế (ví dụ: thuế GTGT, TNDN, TNCN)",
+                    "taxpayer": "đối tượng nộp thuế (doanh nghiệp, hộ kinh doanh hay cá nhân)",
+                    "donation_type": "loại khoản đóng góp",
+                }
+                return {
+                    "needs_clarification": True,
+                    "ambiguity_type": "scope",
+                    "missing_scope": missing,
+                    "clarification": "Vui lòng nêu rõ "
+                        + " và ".join(labels[item] for item in missing) + ".",
+                }
+
+        # Open enterprise registration queries lacking both document anchor and enterprise type
+        broad_enterprise_query = bool(re.search(
+            r"(?i)\b(?:điều\s+kiện\s+đăng\s+ký\s+doanh\s+nghiệp|thủ\s+tục\s+đăng\s+ký\s+doanh\s+nghiệp|"
+            r"thủ\s+tục\s+thành\s+lập\s+doanh\s+nghiệp|hồ\s+sơ\s+đăng\s+ký\s+doanh\s+nghiệp)\b",
+            question,
+        ))
+        if broad_enterprise_query and not has_document:
+            has_subject = bool(re.search(
+                r"(?i)(?:TNHH|trách\s+nhiệm\s+hữu\s+hạn|cổ\s+phần|tư\s+nhân|hợp\s+danh|hộ\s+kinh\s+doanh|chi\s+nhánh|văn\s+phòng\s+đại\s+diện)",
+                question,
+            ))
+            if not has_subject:
+                return {
+                    "needs_clarification": True,
+                    "ambiguity_type": "scope",
+                    "missing_scope": ["subject", "document"],
+                    "clarification": (
+                        "Bạn muốn tra cứu cho loại hình doanh nghiệp nào "
+                        "(công ty TNHH, công ty cổ phần, doanh nghiệp tư nhân...) "
+                        "hoặc theo văn bản cụ thể nào?"
+                    ),
+                }
+        return None
+        """Record a clarification hint for an intent missing document or essential scope."""
+        question = (text or "").strip()
+        if not question:
+            return None
+        has_provision = bool(re.search(
+            r"(?i)\b(?:điểm|khoản|điều)\s*[0-9]", question
+        ))
+        has_document = bool(extract_anchors(question).doc_numbers)
+        if has_provision and not has_document:
+            return {
+                "needs_clarification": True,
+                "ambiguity_type": "document",
+                "missing_scope": ["document"],
+                "clarification": (
+                    "Bạn muốn tra Điều/Khoản/Điểm này của văn bản nào? "
+                    "Vui lòng cho tên hoặc số hiệu văn bản."
+                ),
+            }
+        vague = bool(re.search(
+            r"(?i)^(?:cho tôi kết luận pháp lý cụ thể|hãy cho tôi kết luận pháp lý|"
+            r"kết luận pháp lý)\b",
+            question,
+        ))
+        if vague:
+            return {
+                "needs_clarification": True,
+                "ambiguity_type": "scope",
+                "missing_scope": ["scope"],
+                "clarification": (
+                    "Vui lòng nêu vấn đề pháp lý cụ thể, văn bản/điều khoản "
+                    "liên quan và dữ kiện vụ việc nếu có."
+                ),
+            }
+
+        # Open tax obligation / declaration / rate / exemption queries lacking both doc anchor and tax/taxpayer scope
+        broad_tax_query = bool(re.search(
+            r"(?i)\b(?:nghĩa vụ\s+kê\s+khai\s+thuế|kê\s+khai\s+thuế|nộp\s+thuế|hoàn\s+thuế|"
+            r"miễn\s+thuế|giảm\s+thuế|thuế\s+suất|đóng\s+góp\s+từ\s+thiện)\b",
+            question,
+        ))
+        if broad_tax_query and not has_document:
+            missing: list[str] = []
+            if not re.search(
+                r"(?i)(?:thuế\s+(?:TNCN|TNDN|GTGT|môn\s+bài|tiêu\s+thụ\s+đặc\s+biệt|"
+                r"xuất\s+nhập\s+khẩu|thu\s+nhập\s+cá\s+nhân|thu\s+nhập\s+doanh\s+nghiệp|"
+                r"giá\s+trị\s+gia\s+tăng)|GTGT|TNDN|TNCN)",
+                question,
+            ):
+                missing.append("tax_type")
+            if not re.search(
+                r"(?i)(?:cá\s+nhân|doanh\s+nghiệp|công\s+ty|hộ\s+kinh\s+doanh|tổ\s+chức|người\s+nộp\s+thuế)",
+                question,
+            ):
+                missing.append("taxpayer")
+            if re.search(r"(?i)(?:đóng\s+góp\s+từ\s+thiện|khoản\s+từ\s+thiện)", question) and not re.search(
+                r"(?i)(?:ủng\s+hộ|quyên\s+góp|từ\s+thiện\s+(?:cho|tại|đến)\s+\w+)", question
+            ):
+                missing.append("donation_type")
+            if missing:
+                labels = {
+                    "tax_type": "sắc thuế (ví dụ: thuế GTGT, TNDN, TNCN)",
+                    "taxpayer": "đối tượng nộp thuế (doanh nghiệp, hộ kinh doanh hay cá nhân)",
+                    "donation_type": "loại khoản đóng góp",
+                }
+                return {
+                    "needs_clarification": True,
+                    "ambiguity_type": "scope",
+                    "missing_scope": missing,
+                    "clarification": "Vui lòng nêu rõ "
+                        + " và ".join(labels[item] for item in missing) + ".",
+                }
+
+        # Open enterprise registration / establishment queries lacking both doc anchor and enterprise type
+        broad_enterprise_query = bool(re.search(
+            r"(?i)\b(?:điều\s+kiện\s+đăng\s+ký\s+doanh\s+nghiệp|thủ\s+tục\s+đăng\s+ký\s+doanh\s+nghiệp|"
+            r"thủ\s+tục\s+thành\s+lập\s+doanh\s+nghiệp|hồ\s+sơ\s+đăng\s+ký\s+doanh\s+nghiệp)\b",
+            question,
+        ))
+        if broad_enterprise_query and not has_document:
+            has_subject = bool(re.search(
+                r"(?i)(?:TNHH|trách\s+nhiệm\s+hữu\s+hạn|cổ\s+phần|tư\s+nhân|hợp\s+danh|hộ\s+kinh\s+doanh|chi\s+nhánh|văn\s+phòng\s+đại\s+diện)",
+                question,
+            ))
+            if not has_subject:
+                return {
+                    "needs_clarification": True,
+                    "ambiguity_type": "scope",
+                    "missing_scope": ["subject", "document"],
+                    "clarification": (
+                        "Bạn muốn tra cứu cho loại hình doanh nghiệp nào "
+                        "(công ty TNHH, công ty cổ phần, doanh nghiệp tư nhân...) "
+                        "hoặc theo văn bản cụ thể nào?"
+                    ),
+                }
+        return None
     def rewrite_clarified_intent(
         self,
         *,
@@ -356,7 +548,7 @@ class QueryDecomposer:
             rewritten = str(llm.complete(build_rewriter_prompt(source, context)) or "")
             rewritten = rewritten.strip().strip('"').splitlines()[0].strip()
         except Exception as exc:
-            return "", {"status": "ERROR", "reason": "rewrite_llm_error", "error": str(exc)}
+            return "", {"status": "ERROR", "reason": "rewrite_llm_error"}
         if not rewritten:
             return "", {"status": "ERROR", "reason": "rewrite_empty"}
 
@@ -364,6 +556,7 @@ class QueryDecomposer:
         allowed_anchors = extract_anchors(source)
         rewritten_anchors = extract_anchors(rewritten)
         fields = ("doc_numbers", "articles", "clauses", "points", "dates")
+        has_original_anchor = any(getattr(original_anchors, field) for field in fields)
         missing = {
             field: [value for value in getattr(original_anchors, field)
                     if value not in getattr(rewritten_anchors, field)]
@@ -376,6 +569,8 @@ class QueryDecomposer:
         }
         missing = {key: value for key, value in missing.items() if value}
         added = {key: value for key, value in added.items() if value}
+        if not has_original_anchor:
+            missing = {}
         audit = {
             "status": "REJECTED" if missing or added else "ANCHORS_VALIDATED",
             "original_sub_query": original_sub_query,
@@ -400,9 +595,10 @@ class QueryDecomposer:
         """Fallback chỉ dùng cho các split không mơ hồ.
 
         Áp dụng khi LLM planner lỗi nhưng câu có ít nhất hai chuẩn văn bản
-        khác nhau, hoặc một vế rõ ràng ngoài phạm vi pháp luật kèm một vế
-        pháp lý có anchor. Không dùng heuristic này thay cho planner trên
-        câu thiếu dữ kiện hoặc câu nội dung pháp lý không rõ.
+        khác nhau, một vế rõ ràng ngoài phạm vi pháp luật kèm một vế pháp lý
+        có anchor, hoặc một vế có anchor kèm một vế thiếu phạm vi cần làm rõ.
+        Không dùng heuristic này thay cho planner trên câu thiếu dữ kiện
+        hoặc câu nội dung pháp lý không rõ.
         """
         temporal_matches = list(re.finditer(
             r"(?i)(?:trước|từ|kể từ|sau|tại|vào)\s+(?:ngày\s+)?"
@@ -443,6 +639,8 @@ class QueryDecomposer:
                     "is_out_of_domain": False,
                     "needs_clarification": False,
                     "clarification": "",
+                    "ambiguity_type": "",
+                    "missing_scope": [],
                     "temporal_expression": match.group(0),
                     "temporal_constraint": constraint,
                     "temporal_operator": constraint.get("operator") if constraint else None,
@@ -450,7 +648,7 @@ class QueryDecomposer:
                     "normalized_target_date": constraint.get("normalized_target_date") if constraint else None,
                     "temporal_constraint_source": constraint.get("temporal_constraint_source") if constraint else None,
                 })
-            return {"planned": True, "status": "planned", "intents": intents}
+            return {"planned": True, "status": "planned", "clarification_round": 0, "intents": intents}
 
         parts = [
             part.strip(" ,;:-")
@@ -474,6 +672,10 @@ class QueryDecomposer:
         doc_sets = [set(extract_anchors(part).doc_numbers) for part in parts]
         distinct_docs = set().union(*doc_sets)
         ood_count = sum(1 for part in parts if out_of_domain(part))
+        scope_hints = [
+            None if out_of_domain(part) else self._single_intent_scope_hint(part)
+            for part in parts
+        ]
         has_semicolon_split = bool(re.search(r";", question))
         complete_semicolon_parts = has_semicolon_split and len(parts) == 2 and all(
             re.search(r"(?:gì|nào|thế nào|\?)", part, re.I)
@@ -482,13 +684,77 @@ class QueryDecomposer:
         if len(distinct_docs) < 2 and not (
             (ood_count == 1 and any(doc_sets))
             or complete_semicolon_parts
+            or (any(doc_sets) and any(scope_hints))
         ):
             return None
 
         intents: list[dict[str, Any]] = []
         for index, part in enumerate(parts[:12], start=1):
             is_ood = out_of_domain(part)
+            hint = scope_hints[index - 1] if not is_ood else None
             intents.append({
+                "intent_id": f"intent-{index}",
+                "intent_index": index - 1,
+                "sub_query": part,
+                "original_sub_query": part,
+                "original_sub_question": part,
+                "source_clause": part,
+                "is_out_of_domain": is_ood,
+                "needs_clarification": bool(hint),
+                "clarification": str((hint or {}).get("clarification") or ""),
+                "ambiguity_type": str((hint or {}).get("ambiguity_type") or ""),
+                "missing_scope": list((hint or {}).get("missing_scope") or []),
+                "temporal_expression": "",
+                "temporal_constraint": parse_temporal_constraint(part),
+            })
+        return {"planned": True, "status": "planned", "clarification_round": 0, "intents": intents}
+    @staticmethod
+    def _is_actionable_subquestion(part: str) -> bool:
+        """A split fragment usable as an independent retrieval target."""
+        text = (part or "").strip()
+        if len(text) < 8:
+            return False
+        if re.search(r"(?i)(?:gì|nào|thế nào|như thế nào|\?|？)", text):
+            return True
+        if re.search(r"(?i)\b(?:điểm|khoản|điều)\s*\d+|\d{1,3}/\d{4}/", text):
+            return True
+        return False
+
+    def _permissive_split_plan(self, question: str) -> dict[str, Any] | None:
+        """Planner-error fallback (Fix E): split a multi-intent question into
+        clear sub-questions on conjunctions/semicolons so one broken intent
+        does not fail the whole question. Clear intents go to retrieval;
+        only intents actually missing data get a clarification hint.
+
+        Used ONLY when the LLM planner errored/failed to parse (the strict
+        rule plan already ran and returned None). Not a replacement for a
+        successful planner.
+        """
+        parts = [
+            part.strip(" ,;:-")
+            for part in re.split(r"\b(?:và|cũng như)\b|;", question, flags=re.I)
+            if part.strip(" ,;:-")
+        ]
+        kept = [part for part in parts if self._is_actionable_subquestion(part)]
+        if len(kept) < 2:
+            # Secondary try: comma-separated short clauses (e.g. "nghĩa vụ thuế,
+            # thời hạn, mức phạt ...?").
+            comma_parts = [
+                part.strip(" ,;:-")
+                for part in re.split(r",", question)
+                if part.strip(" ,;:-")
+            ]
+            kept = [p for p in comma_parts if len(p) >= 8]
+            if len(kept) < 2:
+                return None
+        intents: list[dict[str, Any]] = []
+        for index, part in enumerate(kept[:4], start=1):
+            is_ood = bool(re.search(
+                r"(?i)\b(?:thời tiết|bản tin thời tiết|dự báo)\b"
+                r"|ngoài phạm vi pháp luật|out of domain",
+                part,
+            ))
+            intent: dict[str, Any] = {
                 "intent_id": f"intent-{index}",
                 "intent_index": index - 1,
                 "sub_query": part,
@@ -500,8 +766,19 @@ class QueryDecomposer:
                 "clarification": "",
                 "temporal_expression": "",
                 "temporal_constraint": parse_temporal_constraint(part),
-            })
-        return {"planned": True, "status": "planned", "intents": intents}
+            }
+            # Only the genuinely missing intents are flagged for clarification.
+            hint = self._single_intent_scope_hint(part)
+            if hint and not is_ood:
+                intent.update(hint)
+            intents.append(intent)
+        return {
+            "planned": True,
+            "status": "planned",
+            "intents": intents,
+            "planner_fallback": "permissive_split",
+            "planner_diagnostic": {"fallback": "permissive_split"},
+        }
 
     def plan(self, question: str) -> dict[str, Any]:
         """Create an intent plan before retrieval; never invent missing anchors."""
@@ -515,6 +792,17 @@ class QueryDecomposer:
             "clarification": "",
             "temporal_expression": "",
         }]
+        # Scope hints (document/scope/temporal) are recorded on the intent so the
+        # clarification wizard can target the missing field. They do NOT force a
+        # clarification here: the context resolver runs before planning in
+        # Orchestrator.run, so a follow-up that inherits its document from the
+        # previous turn reaches this gate already carrying a doc number and is
+        # left to semantic retrieval. For multi-intent questions the gate is
+        # deferred to the per-intent loop, which evaluates each sub-question.
+        hint = self._single_intent_scope_hint(question)
+        if hint and not is_multi_intent(question):
+            fallback[0].update(hint)
+            return {"planned": True, "status": "single_intent", "intents": fallback}
         if not self.should_check(question):
             return {"planned": False, "status": "single_intent", "intents": fallback}
 
@@ -559,6 +847,14 @@ CÂU HỎI:
         except Exception as exc:
             if rule_plan is not None:
                 return rule_plan
+            permissive = self._permissive_split_plan(question)
+            if permissive is not None:
+                permissive["planner_diagnostic"] = {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:240],
+                    "fallback": "permissive_split",
+                }
+                return permissive
             return {
                 "planned": True, "status": "llm_error", "intents": fallback,
                 "planner_diagnostic": {
@@ -643,6 +939,14 @@ CÂU HỎI:
                 )
                 sub = re.sub(r"\s{2,}", " ", sub).strip(" ,;:.-")
             clarification = str(raw.get("clarification") or "").strip()
+            ambiguity_type = str(raw.get("ambiguity_type") or "").strip()
+            missing_scope_raw = raw.get("missing_scope")
+            if isinstance(missing_scope_raw, (list, tuple)):
+                missing_scope = [str(value).strip() for value in missing_scope_raw if str(value).strip()]
+            elif missing_scope_raw:
+                missing_scope = [str(missing_scope_raw).strip()]
+            else:
+                missing_scope = []
             ood_text = bool(re.search(
                 r"(?i)ngo\u00e0i\s+ph\u1ea1m\s+vi|ngo\u00e0i\s+l\u0129nh\s+v\u1ef1c|"
                 r"kh\u00f4ng\s+thu\u1ed9c\s+ph\u1ea1m\s+vi|kh\u00f4ng\s+ph\u1ea3i\s+c\u00e2u\s+h\u1ecfi\s+ph\u00e1p\s+lu\u1eadt|\bOOD\b|out\s+of\s+domain",
@@ -686,6 +990,15 @@ CÂU HỎI:
                     clarification = "Vui lòng cho biết " + ", ".join(questions[k] for k in missing) + "."
             if needs and not clarification:
                 clarification = f"Bạn có thể làm rõ ý này: {sub}?"
+            scope_hint = self._single_intent_scope_hint(sub)
+            if scope_hint and not is_out_of_domain and not is_time_comparison:
+                if not needs:
+                    needs = True
+                    clarification = scope_hint["clarification"]
+                if not ambiguity_type:
+                    ambiguity_type = str(scope_hint.get("ambiguity_type") or "")
+                if not missing_scope:
+                    missing_scope = list(scope_hint.get("missing_scope") or [])
             temporal_constraint = normalized_time
             intents.append({
                 "intent_id": str(raw.get("intent_id") or f"intent-{intent_number}"),
@@ -697,6 +1010,8 @@ CÂU HỎI:
                 "is_out_of_domain": is_out_of_domain,
                 "needs_clarification": needs,
                 "clarification": clarification if needs else "",
+                "ambiguity_type": ambiguity_type,
+                "missing_scope": missing_scope,
                 "temporal_expression": temporal_expression or str(
                     (temporal_constraint or {}).get("temporal_expression") or ""
                 ),
@@ -711,7 +1026,7 @@ CÂU HỎI:
                 return rule_plan
             return {"planned": True, "status": "invalid_plan", "intents": fallback,
                     "planner_diagnostic": {"raw_output": safe_output}}
-        return {"planned": True, "status": "planned", "intents": intents}
+        return {"planned": True, "status": "planned", "clarification_round": 0, "intents": intents}
 
     def fill(
         self,

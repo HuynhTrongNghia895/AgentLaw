@@ -13,6 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -60,7 +61,6 @@ def get_orchestrator():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pre-warm Orchestrator on startup
     try:
         get_orchestrator()
         print("[api_server] Orchestrator initialized successfully.")
@@ -76,7 +76,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -98,11 +97,14 @@ class ChatRequest(BaseModel):
 
 
 def clean_technical_artifacts(text: str) -> str:
-    """Strip technical markup artifacts like >>, <<, etc."""
+    """Strip technical markup artifacts like >>, << and [[INTENT:n]] markers."""
     if not text or not isinstance(text, str):
         return ""
     cleaned = re.sub(r">>+", "", text)
     cleaned = re.sub(r"<<+", "", cleaned)
+    cleaned = re.sub(r"\[\[INTENT:\d+\]\]", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*$\n+", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
 
@@ -122,9 +124,26 @@ def get_system_internal_date() -> str:
     return "22/11/2026"
 
 
+def get_system_internal_documents() -> list[str]:
+    """Retrieve list of indexed legal documents from DocumentRegistry."""
+    try:
+        from graph.kg.loader import load_registry
+
+        reg = load_registry()
+        docs: list[str] = []
+        for so_hieu, meta in reg.items():
+            title = str(meta.get("ten_van_ban") or meta.get("loai_van_ban") or "").strip()
+            docs.append(f"{title} {so_hieu}".strip() if title and so_hieu not in title else (title or so_hieu))
+        if docs:
+            return docs
+    except Exception:
+        pass
+    return []
+
+
 @app.get("/api/metadata")
 async def get_metadata():
-    """Return backend readiness status and internal database date."""
+    """Return backend readiness status, internal database date, and indexed document list."""
     is_ready = True
     if _init_error and _orchestrator is None:
         is_ready = False
@@ -133,15 +152,102 @@ async def get_metadata():
         content=jsonable_encoder({
             "internalDataLabel": "Dữ liệu nội bộ",
             "internalDataDate": get_system_internal_date(),
+            "internalDocuments": get_system_internal_documents(),
             "readiness": "ready" if is_ready else "offline",
             "isMock": False,
         })
     )
 
 
+def _extract_web_points(source: dict[str, Any]) -> list[str]:
+    """Build clean bullet points from legal_extraction or snippet content."""
+    points: list[str] = []
+    extraction = source.get("legal_extraction") or {}
+    if isinstance(extraction, dict):
+        doc_num = str(extraction.get("document_number") or "").strip()
+        pub_date = str(extraction.get("publication_date") or "").strip()
+        eff_date = str(extraction.get("effective_date") or "").strip()
+        if doc_num:
+            meta_bits = [f"Số hiệu văn bản ghi nhận: {doc_num}"]
+            if pub_date:
+                meta_bits.append(f"ban hành {pub_date}")
+            if eff_date:
+                meta_bits.append(f"hiệu lực {eff_date}")
+            points.append(" — ".join(meta_bits))
+
+        for rel in (extraction.get("relations") or [])[:3]:
+            if isinstance(rel, dict):
+                desc = str(
+                    rel.get("statement")
+                    or rel.get("summary")
+                    or rel.get("relation_type")
+                    or ""
+                ).strip()
+                if desc:
+                    points.append(clean_technical_artifacts(desc)[:240])
+
+        for item in (extraction.get("provisions") or extraction.get("clauses") or extraction.get("excerpts") or [])[:3]:
+            text_val = item.get("text") if isinstance(item, dict) else str(item)
+            clean_val = clean_technical_artifacts(str(text_val or ""))
+            if clean_val and clean_val not in points:
+                points.append(clean_val[:260] + ("…" if len(clean_val) > 260 else ""))
+
+    if not points:
+        raw_content = clean_technical_artifacts(str(source.get("content") or ""))
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+|\n+", raw_content)
+            if len(s.strip()) >= 25
+        ]
+        for sent in sentences[:3]:
+            points.append(sent[:260] + ("…" if len(sent) > 260 else ""))
+
+    return points
+
+
+def _build_web_context(raw_web_sources: list[Any]) -> list[dict[str, Any]]:
+    """Map raw web search sources to structured WebExtractedItem cards."""
+    items: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for idx, src in enumerate(raw_web_sources):
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+
+        host = ""
+        if url:
+            try:
+                host = (urlparse(url if "//" in url else f"//{url}").hostname or "").lower()
+            except ValueError:
+                host = ""
+        source_domain = host or "Nguồn web pháp lý"
+        title = clean_technical_artifacts(str(src.get("title") or "")) or f"Tài liệu tham khảo từ {source_domain}"
+        authority_tier = str(src.get("authority_tier") or "unknown")
+        if authority_tier not in ("official", "secondary", "unknown"):
+            authority_tier = "unknown"
+
+        items.append({
+            "id": f"web-{idx}-{uuid.uuid4().hex[:6]}",
+            "title": title,
+            "sourceDomain": source_domain,
+            "url": url,
+            "date": str(src.get("date") or "").strip() or None,
+            "authorityTier": authority_tier,
+            "extractedPoints": _extract_web_points(src),
+            "warning": f"Cần tìm hiểu thêm và đối chiếu văn bản gốc tại {source_domain}",
+        })
+    return items
+
+
 def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation_ctx: str) -> dict[str, Any]:
     """Map Orchestrator.run output dictionary to frontend ChatMessage schema."""
-    answer_text = raw_out.get("answer") or raw_out.get("follow_up") or "Hệ thống đã xử lý xong yêu cầu tra cứu."
+    answer_text = clean_technical_artifacts(
+        raw_out.get("answer") or raw_out.get("follow_up") or ""
+    ) or "Hệ thống đã xử lý xong yêu cầu tra cứu."
 
     # 1. Trace mapping
     raw_trace = raw_out.get("trace") or []
@@ -165,12 +271,30 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
             "detail": detail,
         })
 
-    # 2. Evidences & Citations mapping
-    raw_primary = raw_out.get("primary_evidence") or []
-    raw_context = raw_out.get("legal_context") or []
+    # 2. Evidences & Citations mapping (strictly internal KB; web is separated into webContext)
+    raw_primary = list(raw_out.get("primary_evidence") or [])
+    raw_context = list(raw_out.get("legal_context") or [])
 
-    # If primary_evidence / legal_context are empty but general evidence exists:
-    if not raw_primary and not raw_context:
+    metadata = raw_out.get("metadata") or {}
+    retrieval_status = str(metadata.get("retrieval_status") or "").upper()
+    abstained = bool(
+        metadata.get("abstain")
+        or metadata.get("insufficient")
+        or metadata.get("ood")
+        or retrieval_status in {"ABSTAIN", "INSUFFICIENT", "OOD"}
+    )
+    planner_state = raw_out.get("planner_state") or {}
+    pending_intents = [
+        i for i in (planner_state.get("intents") or [])
+        if isinstance(i, dict) and i.get("needs_clarification")
+    ]
+    if pending_intents:
+        abstained = True
+
+    if abstained:
+        raw_primary = []
+        raw_context = []
+    elif not raw_primary and not raw_context:
         for ev in raw_out.get("evidence") or []:
             if isinstance(ev, dict):
                 ev_class = ev.get("evidence_class")
@@ -311,18 +435,37 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
         if isinstance(c_item, dict):
             process_evidence_item(c_item, "context", j)
 
+    # Dedicated webContext extraction block
+    web_context = _build_web_context(raw_out.get("web_sources") or [])
+
     # 3. Verification Banner
     verification_banner = None
     route = str(raw_out.get("route") or "")
     conflict_report = raw_out.get("conflict_report") or {}
     web_avail = raw_out.get("web_available")
+    temporal_verification = raw_out.get("temporal_verification") or {}
+    temporal_status = str(temporal_verification.get("status") or "")
 
     if route == "time_travel":
-        verification_banner = {
-            "status": "provisional",
-            "title": "Cảnh báo xác minh thời gian",
-            "message": "Kết quả tra cứu phụ thuộc vào mốc thời gian áp dụng; cần đối chiếu ngày hiệu lực văn bản gốc.",
-        }
+        if temporal_status == "confirmed":
+            verification_banner = {
+                "status": "confirmed",
+                "title": "Đã xác minh mốc thời gian",
+                "message": "Nguồn web đã trả kết quả hợp lệ cho mốc thời gian hỏi; đối chiếu thêm văn bản chính thức khi cần.",
+            }
+        elif temporal_status == "unverified":
+            verification_banner = {
+                "status": "unverified",
+                "title": "Chưa xác minh được nguồn web",
+                "message": "Web không khả dụng; kết quả thời điểm hỏi mang tính tham khảo, chưa xác minh bằng nguồn chính thức.",
+            }
+        else:
+            verification_banner = {
+                "status": "provisional",
+                "title": "Xác minh thời gian (tạm thời)",
+                "message": "Kết quả thời điểm hỏi dựa trên nội bộ/cơ sở dữ liệu; web chưa trả nguồn hợp lệ để xác minh."
+                           + (" Đối chiếu ngày hiệu lực văn bản gốc khi cần." if temporal_verification.get("web_status") in ("no_result", "called") else ""),
+            }
     elif conflict_report and (conflict_report.get("has_conflict") or conflict_report.get("status") == "CONFLICT"):
         verification_banner = {
             "status": "provisional",
@@ -341,7 +484,6 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
     planner_state = raw_out.get("planner_state")
     choices = raw_out.get("choices") or []
 
-    # Check if we need clarification wizard
     needs_clarify = False
     pending_intent_label = ""
     clarification_questions = []
@@ -359,12 +501,56 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
                 if not pending_intent_label:
                     pending_intent_label = pi_label
 
-                # Options for this intent
+                missing = [str(value).strip().lower() for value in (pi.get("missing_scope") or []) if str(value).strip()]
+                ambiguity = str(pi.get("ambiguity_type") or "").strip().lower()
+                option_specs: list[dict[str, Any]] = []
+                if any(value in {"document", "doc", "văn bản", "so_hieu"} for value in missing) or ambiguity in {"document", "doc"}:
+                    option_specs.append({
+                        "label": "Chọn số hiệu văn bản áp dụng",
+                        "requiresInput": True,
+                        "placeholder": "Nhập tên hoặc số hiệu văn bản (ví dụ: Luật Doanh nghiệp 59/2020/QH14, Nghị định 168/2025/NĐ-CP)...",
+                    })
+                if any(value in {"provision", "article", "clause", "điều khoản"} for value in missing) or ambiguity in {"provision", "article"}:
+                    option_specs.append({
+                        "label": "Nêu rõ Điều/Khoản/Điểm cần tra",
+                        "requiresInput": True,
+                        "placeholder": "Nhập cụ thể Điều, Khoản, Điểm cần tra cứu...",
+                    })
+                if any(value in {"tax_type", "taxpayer", "donation_type", "scope", "đối tượng", "subject", "phạm vi"} for value in missing) or ambiguity in {"scope", "taxpayer"}:
+                    option_specs.append({
+                        "label": "Nêu rõ sắc thuế và đối tượng áp dụng",
+                        "requiresInput": True,
+                        "placeholder": "Nhập sắc thuế và đối tượng áp dụng (ví dụ: Thuế GTGT, doanh nghiệp; hoặc Thuế TNCN, cá nhân)...",
+                    })
+                if any(value in {"date", "temporal", "time"} for value in missing) or ambiguity in {"temporal", "date"}:
+                    option_specs.append({
+                        "label": "Nêu rõ mốc thời gian cần áp dụng",
+                        "requiresInput": True,
+                        "placeholder": "Nhập ngày/tháng/năm áp dụng (ví dụ: ngày 01/07/2025)...",
+                    })
+                if not option_specs:
+                    option_specs.append({
+                        "label": "Nhập thông tin làm rõ cho ý này",
+                        "requiresInput": True,
+                        "placeholder": pi.get("clarification") or f"Nhập thông tin cụ thể cho ý: {pi_label}...",
+                    })
+
                 opts = [
-                    {"id": f"opt-{q_idx}-1", "label": "Xác nhận áp dụng theo văn bản hiện hành"},
-                    {"id": f"opt-{q_idx}-2", "label": "Xác nhận áp dụng theo dự thảo / quy định sửa đổi"},
-                    {"id": f"opt-{q_idx}-other", "label": "Khác", "allowCustomText": True, "description": "Tự nhập trường hợp cụ thể của bạn"},
+                    {
+                        "id": f"opt-{q_idx}-{index}",
+                        "label": spec["label"],
+                        "requiresInput": spec["requiresInput"],
+                        "placeholder": spec["placeholder"],
+                    }
+                    for index, spec in enumerate(option_specs, start=1)
                 ]
+                opts.append({
+                    "id": f"opt-{q_idx}-other",
+                    "label": "Khác",
+                    "allowCustomText": True,
+                    "requiresInput": True,
+                    "description": "Tự nhập trường hợp cụ thể của bạn",
+                })
                 clarification_questions.append({
                     "id": str(pi.get("intent_id") or f"intent-{q_idx}"),
                     "label": f"Câu {q_idx + 1}/{len(pending_intents)}",
@@ -379,7 +565,7 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
             {"id": f"choice-{c_i}", "label": str(choice_text)}
             for c_i, choice_text in enumerate(choices)
         ]
-        opts.append({"id": "choice-other", "label": "Khác", "allowCustomText": True})
+        opts.append({"id": "choice-other", "label": "Khác", "allowCustomText": True, "requiresInput": True})
         clarification_questions.append({
             "id": "refine-question-1",
             "label": "Câu 1/1",
@@ -402,6 +588,7 @@ def map_orchestrator_output(raw_out: dict[str, Any], user_msg: str, conversation
         "createdAt": int(asyncio.get_event_loop().time() * 1000),
         "trace": trace_steps,
         "evidences": evidences,
+        "webContext": web_context,
         "verificationBanner": verification_banner,
         "citations": citations,
         "clarification": clarification,
@@ -421,11 +608,9 @@ async def chat_endpoint(request: ChatRequest):
             detail="Dịch vụ phân tích pháp lý AgentLaw chưa sẵn sàng.",
         )
 
-    # Standardize conversation context format (Người dùng: ...\nTrợ lý: ...)
     clean_ctx = (request.conversationContext or "").strip()
 
     try:
-        # Run synchronous Orchestrator.run in threadpool
         raw_result = await asyncio.to_thread(
             orch.run,
             question=request.message,
@@ -441,10 +626,8 @@ async def chat_endpoint(request: ChatRequest):
             detail="Lỗi trong quá trình xử lý suy luận pháp lý.",
         )
 
-    # Map to frontend schema
     chat_message = map_orchestrator_output(raw_result, request.message, clean_ctx)
 
-    # Build updated conversation context
     user_turn = f"Người dùng: {request.message}"
     if request.userAnswer:
         user_turn += f" (Đã chọn làm rõ: {request.userAnswer})"
@@ -455,7 +638,6 @@ async def chat_endpoint(request: ChatRequest):
     else:
         updated_context = f"{user_turn}\n{assistant_turn}"
 
-    # Return safe JSON with encoder
     response_payload = {
         "message": chat_message,
         "conversationContext": updated_context,

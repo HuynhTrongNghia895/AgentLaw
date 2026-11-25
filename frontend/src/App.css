@@ -17,7 +17,6 @@
 .history-select span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delete-session { display: grid; place-items: center; border: 0; background: transparent; color: #8e99aa; padding: 4px; opacity: 0; }
 .history-item:hover .delete-session { opacity: 1; }
-/* Hạng mục 6: storage info replaces dead "Người dùng / Tài khoản" */
 .sidebar-storage-info { margin-top: auto; border-top: 1px solid #263249; padding-top: 14px; color: #969ead; font-size: 11px; line-height: 1.4; }
 
 .main-area { flex: 1 1 0%; width: 100%; min-width: 0; display: grid; grid-template-rows: 64px minmax(0, 1fr) 58px; height: 100vh; overflow-x: hidden; }
@@ -58,7 +57,7 @@
 .chat-content { width: min(820px, calc(100% - 40px)); margin: 0 auto; }
 .user-row { display: flex; justify-content: flex-end; margin: 0 0 16px; }
 .user-bubble { max-width: 440px; border: 1px solid #263249; border-radius: 12px 12px 2px 12px; background: #17243a; padding: 13px 16px; }
-.answer-wrap { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; }
+.answer-wrap { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; margin-bottom: 20px; }
 .agent-avatar { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid #263249; border-radius: 50%; background: #17243a; }
 .trace-bar { margin-bottom: 12px; border: 1px solid #263249; border-radius: 8px; background: #17243a; }
 .trace-toggle { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #969ead; padding: 10px 12px; text-align: left; }
@@ -72,6 +71,26 @@
 .answer-card { color: #dfe5ef; }
 .answer-card h3 { margin: 14px 0 6px; color: #f0f1f4; font-size: 15px; }
 .answer-card p { color: #c5cddd; font-size: 13.5px; line-height: 1.65; }
+
+/* ---- Web Context Extraction Block ---- */
+.web-context-section { margin-top: 16px; border: 1px solid #35527a; border-radius: 10px; background: #142238; padding: 14px; }
+.web-context-header { display: flex; align-items: center; gap: 7px; color: #7dd3fc; font-size: 11px; font-weight: 800; letter-spacing: .06em; margin-bottom: 10px; }
+.web-context-warning { display: flex; align-items: flex-start; gap: 8px; border: 1px solid #6d6025; border-radius: 8px; background: #332c16; color: #fcd34d; padding: 9px 11px; font-size: 12px; line-height: 1.5; margin-bottom: 12px; }
+.web-context-warning svg { flex-shrink: 0; margin-top: 2px; }
+.web-context-list { display: grid; gap: 10px; }
+.web-context-card { border: 1px solid #263249; border-radius: 8px; background: #101b2d; padding: 11px 13px; }
+.web-context-card-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.web-domain-badge { border-radius: 999px; background: #1e3a5f; color: #93c5fd; padding: 2px 9px; font-size: 11px; font-weight: 700; }
+.web-official-badge { border-radius: 999px; background: #17352a; color: #8fe3aa; padding: 2px 8px; font-size: 11px; }
+.web-date-badge { color: #969ead; font-size: 11px; }
+.web-context-title { display: block; color: #f0f1f4; font-size: 13px; line-height: 1.45; margin-bottom: 6px; }
+.web-extracted-points { margin: 6px 0 8px; padding-left: 18px; color: #cbd5e1; font-size: 12.5px; line-height: 1.6; }
+.web-extracted-points li + li { margin-top: 4px; }
+.web-context-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #1e293b; padding-top: 8px; margin-top: 6px; }
+.web-item-warning { color: #fbbf24; font-size: 11.5px; }
+.web-source-link { display: inline-flex; align-items: center; gap: 4px; color: #7dd3fc; font-size: 12px; font-weight: 600; text-decoration: none; }
+.web-source-link:hover { text-decoration: underline; }
+
 .evidence-section { margin-top: 18px; }
 .evidence-heading { margin: 0 0 8px; color: #969ead; font-size: 11px; font-weight: 800; letter-spacing: .06em; }
 .evidence-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -145,23 +164,19 @@
 .legal-relations ul { margin: 0; padding-left: 18px; color: #c5cddd; font-size: 13px; line-height: 1.7; }
 .source-link { display: inline-block; margin-top: 18px; color: #93a9ef; text-decoration: none; }
 
-/* ---- Hạng mục 7: Metadata Popover ---- */
 .metadata-popover-wrap { position: relative; }
 .metadata-pill { border: 1px solid #263249; border-radius: 7px; background: #17243a; padding: 7px 10px; color: #969ead; font-size: 12px; cursor: pointer; transition: border-color .15s; }
 .metadata-pill:hover { border-color: #52617b; color: #f0f1f4; }
-.metadata-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; min-width: 260px; border: 1px solid #263249; border-radius: 10px; background: #111a2a; box-shadow: 0 8px 32px rgba(0,0,0,.45); padding: 14px 16px; animation: drawerIn .15s ease-out; }
+.metadata-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; min-width: 280px; max-height: 360px; overflow-y: auto; border: 1px solid #263249; border-radius: 10px; background: #111a2a; box-shadow: 0 8px 32px rgba(0,0,0,.45); padding: 14px 16px; animation: drawerIn .15s ease-out; }
 .metadata-popover-title { margin-bottom: 10px; color: #969ead; font-size: 11px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
 .metadata-popover-list { margin: 0; padding-left: 16px; color: #dfe5ef; font-size: 13px; line-height: 1.8; }
 
-/* ---- Hạng mục 2 pills: ring highlight on selected pill ---- */
 .pill-selected-primary { outline: 2px solid #60a5fa; outline-offset: 2px; }
 .pill-selected-context { outline: 2px solid #f59e0b; outline-offset: 2px; }
 
-/* ---- Hạng mục 1 drawer: context badge + effective-date badge ---- */
 .status-context { background: #3a2e00; color: #f0c967; border-radius: 999px; padding: 6px 9px; font-size: 11px; }
 .status-effective-date { background: #192c40; color: #93c5fd; border-radius: 999px; padding: 6px 9px; font-size: 11px; }
 
-/* ---- Hạng mục 3: spacing between "Ý X." paragraphs ---- */
 .answer-card--spaced p + p { margin-top: 0.5rem; }
 .answer-card--spaced strong:first-child { margin-top: 0.75rem; display: inline-block; }
 

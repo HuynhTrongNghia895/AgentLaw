@@ -30,8 +30,19 @@ export interface Evidence {
   relations?: LegalRelation[]
 }
 
+export interface WebExtractedItem {
+  id: string
+  title: string
+  sourceDomain: string
+  url: string
+  date?: string
+  authorityTier?: 'official' | 'secondary' | 'unknown'
+  extractedPoints: string[]
+  warning: string
+}
+
 export interface VerificationBanner {
-  status: 'confirmed' | 'provisional'
+  status: 'confirmed' | 'provisional' | 'unverified'
   title: string
   message: string
 }
@@ -54,6 +65,8 @@ export interface ClarificationOption {
   label: string
   description?: string
   allowCustomText?: boolean
+  requiresInput?: boolean
+  placeholder?: string
 }
 
 export interface ClarificationQuestion {
@@ -79,6 +92,7 @@ export interface ChatMessage {
   createdAt: number
   trace?: TraceStep[]
   evidences?: Evidence[]
+  webContext?: WebExtractedItem[]
   verificationBanner?: VerificationBanner
   citations?: Citation[]
   clarification?: ClarificationState
@@ -97,6 +111,7 @@ export interface ChatSession {
 export interface SystemMetadata {
   internalDataLabel: string
   internalDataDate?: string
+  internalDocuments?: string[]
   readiness: 'ready' | 'loading' | 'offline'
   isMock: boolean
 }
