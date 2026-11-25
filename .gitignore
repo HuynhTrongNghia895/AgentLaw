@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+*.pyc
+.streamlit/secrets.toml
+.DS_Store
+
+# Vector index và artifact huấn luyện — tái tạo được, không commit
+data/vector_db/
+training/artifacts/
+
+# Manifest ingestion cũ chứa đường dẫn máy cục bộ
+data/manifests/docx_ingestion.json
+
+.env
+node_modules/
+frontend/dist/
+data/vector_db/
+data/logs/
+data/backup/
+evaluation/results/
+**/__pycache__/
